@@ -1,0 +1,435 @@
+---
+
+## Background 
+
+You have been hired by the tax authority of the City of Boston to asses Tax Assessments. Your task is to create a model to predict the av_total (assessed value) of properties in the greater Boston area. 
+
+## Libraries
+
+
+```{r, message=FALSE}
+library(tidymodels)
+library(ranger)
+library(vip)
+library(janitor)
+library(dplyr)
+```
+
+
+## Import 
+
+```{r}
+boston <- read.csv("./boston.csv") %>%
+  clean_names()
+zips <- read.csv("./zips.csv") %>%
+  clean_names()
+
+```
+
+## Explore Target 
+1. make a histogram of av_total
+2. make a box plot of av_total
+
+```{r}
+#find the optimized bins with rice rule
+nrows <- boston %>%
+  filter(!is.na(av_total))%>%
+  nrow()
+
+rice_rule <- floor((nrows^(1/3))*2)
+
+boston %>%
+  ggplot(aes(av_total))+
+  geom_histogram(bins = rice_rule)+
+  scale_x_continuous(expand = c(0,0)) +
+  labs(title = "histogram using rice rules, bin = 42",x="AV_TOTAL")
+
+boston %>%
+  ggplot(aes(av_total))+
+  geom_boxplot()+
+  labs(title = "Box plot of total assessed value",x="AV_TOTAL")
+```
+
+## Transform
+1. join boston to zips on zipcode = zip
+2. create a home age variable by using: 
+  - IF yr_remod > yr_built THEN age = 2020 - yr_remod
+  - ELSE age = 2020 - yr_built
+
+```{r}
+boston_full_table <- zips %>%
+  mutate(zip = as.integer(zips$zip)) %>%
+  inner_join(boston,by=c("zip"="zipcode")) %>%
+  mutate(home_age = if_else(yr_remod > yr_built, 2020-yr_remod, 2020 - yr_built))
+```
+
+## Explore Numeric Predictors 
+step 1: create histograms of av_total, land_sf, living_area, age
+ 
+```{r}
+# question 1
+boston_full_table %>%
+  ggplot(aes(av_total))+
+  geom_histogram()
+
+boston_full_table %>%
+  ggplot(aes(land_sf))+
+  geom_histogram()
+
+boston_full_table %>%
+  ggplot(aes(living_area))+
+  geom_histogram()
+
+boston_full_table %>%
+  ggplot(aes(home_age))+
+  geom_histogram()
+
+#loop:
+av_total = boston_full_table$av_total
+land_sf = boston_full_table$land_sf
+living_area = boston_full_table$living_area
+home_age = boston_full_table$home_age
+
+numeric_predictors <- data.frame(av_total,land_sf,living_area,home_age)
+p_title <- c("av_total","land_sf","living_area","home_age")
+
+loop.vector <- 1:4
+
+for (i in loop.vector) {
+  x<- numeric_predictors[,i]
+  hist(x,
+       main = paste("Histogram of ", p_title[i]),
+       xlba = p_title[i])
+}
+  
+```
+
+step 2: check the normality assumption of all four variables.
+
+The distributions of all four variables are right skewed.
+```{r}
+boston_full_table %>%
+  ggplot(aes(x=log(av_total)))+
+  geom_histogram()
+
+boston_full_table %>%
+  ggplot(aes(x=log(land_sf)))+
+  geom_histogram()
+
+boston_full_table %>%
+  ggplot(aes(x=log(living_area)))+
+  geom_histogram()
+
+boston_full_table %>%
+  ggplot(aes(x=log(home_age)))+
+  geom_histogram()
+#only the log(home_age) variable still remained a non-normal distribution.
+
+```
+step 3: create a bar chart of mean av_total by city_state
+
+```{r}
+boston_full_table %>%
+  group_by(city_state) %>%
+  summarise(mean_av=mean(av_total))%>%
+  ggplot(aes(x=reorder(city_state,mean_av),y=mean_av))+
+  geom_col() +
+  geom_label(aes(label = round(mean_av, 2), hjust = 0.5), size = 3) + 
+  theme(axis.text.x = element_text(angle = 20, hjust = 1)) +
+  coord_flip()+
+  geom_hline(yintercept = mean(boston_full_table$av_total),linetype = "dashed",color = "red",size = 2)+
+  labs(title = "mean av_total by city_state",x="city_state", y="mean av_total")
+```
+
+
+## Correlations 
+ 
+Create a correlation matrix of av_total,land_sf,living_area and age.
+Remove the missing values.
+
+```{r}
+cor_table <- boston_full_table %>%
+  select(av_total,land_sf,living_area,home_age) %>%
+  mutate(across(av_total:home_age,replace_na,0)) %>%
+  cor()
+cor_table
+
+library(corrplot)
+corrplot(cor_table)
+```
+
+
+## Explore Categorical Predictors 
+
+find 4 categorical variables are likely to be useful in predicting home prices.
+
+step 1. use a bar chart with the mean av_total, 
+  - a useful variable will have differences in the mean of av_total 
+```{r}
+# I selected variables: city_state, r_heat_typ, r_kitch_style and r_roof_typ
+boston_full_table %>%
+  group_by(r_bldg_styl) %>%
+  summarise(mean_av_total = mean(av_total)) %>%
+  ggplot(aes(x=reorder(r_bldg_styl,mean_av_total),y=mean_av_total))+
+  geom_col() +
+  geom_label(aes(label = round(mean_av_total, 2), hjust = 0.5), size = 3) + 
+  theme(axis.text.x = element_text(angle = 20, hjust = 1)) +
+  coord_flip()+
+  geom_hline(yintercept = mean(boston_full_table$av_total),linetype = "dashed",color = "red",size = 2)+
+  labs(title = "Bar Chart of Residential r_bldg_styl", 
+       subtitle = "Boston Area", 
+       x = "Residential r_bldg_styl", 
+       y = "Average Assessed Values for Property")
+
+boston_full_table %>%
+  group_by(r_heat_typ) %>%
+  summarise(mean_av_total = mean(av_total)) %>%
+  ggplot(aes(x=reorder(r_heat_typ,mean_av_total),y=mean_av_total))+
+  geom_col() +
+  geom_label(aes(label = round(mean_av_total, 2), hjust = 0.5), size = 3) + 
+  theme(axis.text.x = element_text(angle = 20, hjust = 1)) +
+  coord_flip()+
+  geom_hline(yintercept = mean(boston_full_table$av_total),linetype = "dashed",color = "red",size = 2)+
+  labs(title = "Bar Chart of Residential r_heat_typ", 
+       subtitle = "Boston Area", 
+       x = "Residential r_heat_typ", 
+       y = "Average Assessed Values for Property")
+  
+
+boston_full_table %>%
+  group_by(r_kitch_style) %>%
+  summarise(mean_av_total = mean(av_total)) %>%
+  ggplot(aes(x=reorder(r_kitch_style,mean_av_total),y=mean_av_total))+
+  geom_col() +
+  geom_label(aes(label = round(mean_av_total, 2), hjust = 0.5), size = 3) + 
+  theme(axis.text.x = element_text(angle = 20, hjust = 1)) +
+  coord_flip()+
+  geom_hline(yintercept = mean(boston_full_table$av_total),linetype = "dashed",color = "red",size = 2)+
+  labs(title = "Bar Chart of Residential r_kitch_style", 
+       subtitle = "Boston Area", 
+       x = "Residential r_kitch_style", 
+       y = "Average Assessed Values for Property")
+
+boston_full_table %>%
+  group_by(r_roof_typ) %>%
+  summarise(mean_av_total = mean(av_total)) %>%
+  ggplot(aes(x=reorder(r_roof_typ,mean_av_total),y=mean_av_total))+
+  geom_col() +
+  geom_label(aes(label = round(mean_av_total, 2), hjust = 0.5), size = 3) + 
+  theme(axis.text.x = element_text(angle = 20, hjust = 1)) +
+  coord_flip()+
+  geom_hline(yintercept = mean(boston_full_table$av_total),linetype = "dashed",color = "red",size = 2)+
+  labs(title = "Bar Chart of Residential r_roof_typ", 
+       subtitle = "Boston Area", 
+       x = "Residential r_roof_typ", 
+       y = "Average Assessed Values for Property")
+  
+```
+
+### Preparing the data 
+
+step 1. select the following columns 
+- pid
+- av_total
+- age 
+- land_sf
+- living_area
+- num_floors
+- population
+- median_income
+- city_state
+PLUS other 4 character columns which I think will be useful.
+
+step 2. Convert character columns to factors 
+  
+```{r}
+data_prep <- boston_full_table %>%
+  dplyr::select(pid,av_total,home_age,land_sf,living_area,num_floors,population,median_income,city_state,r_bldg_styl,r_heat_typ,r_kitch_style,r_roof_typ) %>%
+  mutate_at(c("city_state","r_bldg_styl","r_heat_typ","r_kitch_style","r_roof_typ"),as.factor)
+```
+
+
+
+#1. split the data set into 70% training and 30% test and print out the % of each data set
+
+```{r,message=FALSE}
+library(recipes)
+library(rsample)
+library(modeldata)
+
+set.seed(1234)
+boston_train_test_split <- initial_split(data=data_prep,prop = 0.7,strata = NULL)
+
+train <- training(boston_train_test_split)
+test <- testing(boston_train_test_split)
+
+sprintf("Train PCT : %1.2f%%", nrow(train)/ nrow(data_prep) * 100)
+sprintf("Test PCT : %1.2f%%", nrow(test)/ nrow(data_prep) * 100)
+```
+
+## 2. Recipe
+
+#Define a recipe:
+1. remove pid (step_rm)
+2. impute missing numeric values with the mean (step_meanimpute) 
+3. take the log of all numeric variables (step_log) 
+4. impute missing categorical variables with unknown or mode impute (step_unknown, step_modeimpute)
+5. dummy encode categorical variables (step_dummy)
+
+```{r}
+boston_recipe <-recipe(av_total ~ ., data = train) %>%
+  step_rm(contains("pid")) %>%
+  step_impute_mean(all_numeric(),-all_outcomes()) %>%
+  step_log(all_numeric()) %>%
+  step_impute_mode(all_nominal(),-all_outcomes())%>% 
+  step_dummy(all_nominal(),-all_outcomes()) %>%
+  prep(.)
+
+boston_recipe
+  
+```
+
+## 3. Bake 
+
+```{r}
+# -- apply the recipe 
+bake_train <- bake(boston_recipe,train)
+bake_test <- bake(boston_recipe,test)
+```
+
+## 4. Create and Fit a linear Regression & a Random Forest
+
+ I am creating a model object (linear_reg) by calling the linear_reg method, specifying the mode regression since I am creating a regression task,I set the engine to which engine I want to use typically lm or glmnet then I specify the formula in the fit method and point to my baked data. 
+ 
+```{r}
+# fit to linear regression model
+boston_linear_model <- linear_reg() %>%
+  set_mode("regression") %>%
+  set_engine("lm") %>%
+  fit(av_total ~., data=bake_train)
+
+# fit to random forest model
+random_forest_model <- 
+  rand_forest(trees=25) %>%
+  set_mode("regression") %>%
+  set_engine("ranger",importance="permutation") %>%
+  fit(av_total ~., data=bake_train)
+```
+
+## 4b. Evaluate Fit of Linear Regression 
+```{r}
+glance(boston_linear_model)
+#the RSQUARE of the boston_workflow_fit model is 0.786	
+#random_forest_model
+#the RSQUARE of the random_forest_workflow_fit model is 0.772  
+```
+
+```{r}
+tidy(boston_linear_model) %>%
+  filter(p.value > 0.05)
+
+
+#tidy(pull_workflow_fit(random_forest_workflow_fit))
+```
+
+
+## 5. Prep for Evaluation 
+
+I want to attach the Predicted to the data set, but I took the LOG of AV_TOTAL so I need to convert it back to actual $dollars using EXP, this way I can deep dive into where out model is performing well and where it is not. I do this to both the Training and the Test set. 
+
+
+```{r}
+#1:
+scored_train_lm <- predict(boston_linear_model,bake_train) %>%
+  mutate(.pred = exp(.pred)) %>%
+  bind_cols(train) %>%
+  mutate(.res = av_total - .pred,
+         .model = "linear reg",
+         .part  = "train")
+head(scored_train_lm)
+#2:
+scored_test_lm <- predict(boston_linear_model,bake_test) %>%
+  mutate(.pred = exp(.pred)) %>%
+  bind_cols(test) %>%
+  mutate(.res = av_total - .pred,
+         .model = "linear reg",
+         .part = "test")
+head(scored_test_lm)
+
+#3 
+scored_train_rf <- predict(random_forest_model,bake_train) %>%
+  mutate(.pred = exp(.pred)) %>%
+  bind_cols(train) %>%
+  mutate(.res = av_total - .pred,
+         .model = "random forest",
+         .part = "train")
+head(scored_train_rf)
+         
+#4
+scored_test_rf <- predict(random_forest_model,bake_test) %>%
+  mutate(.pred = exp(.pred)) %>%
+  bind_cols(test) %>%
+  mutate(.res = av_total - .pred,
+         .model = "random forest",
+         .part = "test")
+head(scored_test_rf)
+
+#5
+bind_rows(scored_train_lm,scored_test_lm,scored_train_rf,scored_test_rf) -> model_evaluation
+
+head(model_evaluation)
+tail(model_evaluation)
+```
+
+## 6. Evaluate
+
+I want to check our model's performance and take a look at which features were most important. 
+
+```{r}
+#1
+model_evaluation %>%
+  group_by(.model, .part) %>%
+  metrics(av_total,estimate = .pred) %>%
+  pivot_wider(names_from = .metric,values_from = .estimate) %>%
+  dplyr::select(-.estimator)
+
+#2
+boston_linear_model %>%
+  vip(num_features = 20)
+
+#3
+random_forest_model %>%
+  vip(num_features = 20)
+
+```
+
+## 7. Which Houses did I perform well AND not so well on?
+
+```{r}
+#using only the TEST partition what are the top 5 houses 
+#1
+model_evaluation %>%
+  filter(.model=="linear reg") %>%
+  filter(.part == "test") %>%
+  slice_max(abs(.res),n=5)
+
+#2
+model_evaluation %>%
+  filter(.model == "random forest" & .part == "test") %>%
+  slice_max(abs(.res),n=5)
+
+#using only the TEST partition what are the top 5 houses  that my models didn't predict well.
+
+#1 
+model_evaluation %>%
+  filter(.model == "linear reg" & .part == "test") %>%
+  slice_min(abs(.res),n=5)
+
+#2
+model_evaluation %>%
+  filter(.model == "random forest" & .part == "test") %>%
+  slice_min(abs(.res),n=5)
+```
+
+
+
